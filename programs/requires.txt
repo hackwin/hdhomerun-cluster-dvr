@@ -1,0 +1,4 @@
+zap2xml.exe
+ffmpeg.exe
+/Handle/ (from SysInternals)
+/PSTools/ (from SysInternals)

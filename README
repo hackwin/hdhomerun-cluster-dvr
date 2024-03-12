@@ -1,0 +1,7 @@
+Runs from either a web server, or the PHP CLI
+
+Record ATSC from multiple HDHomeRun Quad Tuners.
+
+Currently designed to work on Windows.  Will support other operating systems in the future.
+
+Does not require a database.
