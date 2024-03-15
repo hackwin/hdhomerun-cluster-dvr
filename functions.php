@@ -12,6 +12,7 @@
   ini_set('output_buffering', 'Off');
   set_error_handler('myErrorHandler');
   register_shutdown_function('shutdownFunction');
+  setlocale(LC_CTYPE, 'en_US.UTF-8');
   
   $tunerChannelLineUp = '';
   $epg = array('xml'=>'', 'lastLoadedTime'=>'');
@@ -49,12 +50,40 @@
       logw('calling function: '.$argv[1],$silent=true);
   }
   
+  function getMemoryUsage(){
+      $output = array();
+      exec('wmic process where processid='.getmypid().' get PeakPageFileUsage /format:csv 2>&1',$output);
+      
+      $keys = str_getcsv($output[1]);
+      $vals = str_getcsv($output[2]);
+      $assoc = array();
+      for($i=0; $i<count($keys); $i++){
+          $assoc[$keys[$i]] = $vals[$i];
+      }
+      
+      //echo '<pre>'.print_r($assoc,true).'</pre>';
+      return number_format($assoc['PeakPageFileUsage']/1024,1).'MB';
+  }
+  
+  function writeDbStatus($channel, $message){
+      $db = mysqli_connect('127.0.0.1', 'root','','dvr');
+      $message = mysqli_real_escape_string($db, $message);
+      mysqli_query($db, 'insert into dvr.channel_status (channel, status) values ("'.$channel.'", "'.$message.'") on duplicate key update status = "'.$message.'"');
+  }
+  
   function logw($message, $silent=false){
     global $log;
     if(is_array($message)){
       $message = print_r($message,true);
     }    
     file_put_contents($log['path'], date('Y-m-d h:i:s A -- ' ).' MEM: '.number_format(memory_get_usage(true)/1024/1024,2).'MB -- '.$message.'<br>', FILE_APPEND);
+    $channel = substr(strstr($log['path'], '['), 1, -6);
+    if(is_numeric($channel)){
+        writeDbStatus($channel, $message);
+    }
+    if($message == ''){
+        $message = '(null)';
+    }
     if(!$silent && $log['echo'] == true){
       if(php_sapi_name() == 'cli'){
         echo '['.strip_tags($message).']'."\r\n";
@@ -93,6 +122,7 @@
       echo '<a href="?detectChannelsAllTuners" target="local">Detect Channels</a> | ';
       echo '<a href="?clearData" target="local">Clear Data</a> | ';
       echo '<a href="?updateElectronicProgramGuide" target="local">Update EPG</a> | ';
+      echo '<a href="?deleteEmptySubFolders" target="local">Delete Empty SubFolders</a> | ';
       echo '<iframe name="local" style="width: 100%; height: 75%;" src="?printWhatsOnNow"></iframe>';
   }
   
@@ -161,12 +191,18 @@
     }
   }
   
-  function transferLogFile($newLogPath){
-      $oldLogData = file_get_contents($log['path']);
-      unlink($log['path']);
-      $log['path'] = $newLogPath;
-      file_put_contents($log['path'], $oldLogData, FILE_APPEND);
-      logw('log file changed to: '.$log['path']);
+  function transferLogFile($newLogFile){
+      global $log;
+      if($newLogFile != pathinfo($log['path'], PATHINFO_BASENAME)){
+          $oldLogData = file_get_contents($log['path']);
+          unlink($log['path']);
+          $log['path'] = pathinfo($log['path'], PATHINFO_DIRNAME).'/'.$newLogFile;
+          file_put_contents($log['path'], $oldLogData, FILE_APPEND);
+          logw('log file changed to: '.$log['path']);
+      }
+      else{
+          logw('reusing existing log file');
+      }
   }
   
   function recordChannelCli($argv){
@@ -177,7 +213,6 @@
           $channel = str_replace('v','',$argv[$mapArg['CHANNEL']]);
           $tuner = null;
           $loop = true;
-          transferLogFile(pathinfo($log['path'], PATHINFO_DIRNAME).'/'.date('Y-m-d').'['.$channel.'].html');
           
           if(isset($argv[$mapArg['LOOP']]) && $argv[$mapArg['LOOP']] == 'noloop'){
             $loop = false;
@@ -192,6 +227,7 @@
   function recordAllFavoriteChannels(){
     $slots = getTunerListPerSlot();
     $channels = array_unique(array_values(getChannelsToRecord()));
+    //shuffle($slots);
     logw($slots);
     logw($channels);
     for($i=0; $i<count($slots)-1 && $i<count($channels); $i++){
@@ -204,7 +240,9 @@
         );
 
         $process = proc_open($cmd, $descriptorspec, $pipes);
-        sleep(1);
+        //if($i > 0 && $slots[$i] == $slots[$i-1]){
+         sleep(1);
+        //}
         //exec($cmd, $output, $return);
         //echo print_r($output,true).'<hr>';
     }
@@ -245,7 +283,7 @@
       exec('D:/tv/programs/zap2xml.exe -u '.$epgAccount['username'].' -p '.$epgAccount['password'].' -o D:/tv/programs/atsc-guide.xml -d 2 -U 2>&1', $output, $return);
       $result = '<pre>'.print_r($output, true).'<pre>';
       echo $result;
-      transferLogFile(pathinfo($log['path'], PATHINFO_DIRNAME).'/epg_'.date('Y-m-d').'.html');
+      transferLogFile('epg_'.date('Y-m-d').'.html');
   }
   
   function http_get_contents($address){
@@ -546,7 +584,10 @@
     }
     else {
         if(isset($show->category) && (string)$show->category == 'Movie'){
-            $path .= '!Movies/';
+            $path .= 'Movies/';
+            if(!file_exists($path)){
+                mkdir($path);
+            }
             $filename .= '[Movie]-'.trim((string)$show->title).' '.(string)$show->date.' - ';
         }
         else{
@@ -588,128 +629,133 @@
   }
   
   function record($channel, $tuner=null, $loop=true){
-      global $log;
-      $log['path'] = pathinfo($log['path'], PATHINFO_DIRNAME).'/'.date('Y-m-d').'['.$channel.'].html';
-      logw('<hr>record function called, channel: '.$channel.', tuner: '.$tuner.', loop: '.$loop);
-      if($tuner == null){
-        $tuner = getTunerWithFreeSlot();
-      }
-      if($tuner == false){ // delay?
-          errorRepeatLoop('no free tuner slots available');
-      }
-      else if(isRecording($channel)){ // ffmpeg connected to tuner.  what about skipping?
-          errorRepeatLoop('already recording channel '.$channel);
-      }
-      else if(!isChannelInLineUp($tuner, $channel)){ // try another open tuner?
-          errorRepeatLoop('channel not in lineup of tuner '.$tuner);
-      }
-      else if(filemtime('D:/tv/programs/atsc-guide.xml') + 2*24*60*60 < time()){
-          errorRepeatLoop('epg is too old.'); // download new epg?  find min/max last show time for channels
-      }
-      $show = findCurrentShow($channel);
-      if($show == false){
-          errorRepeatLoop('failed to find current show on channel.');
-      }
-      logw('show ends at time: '.date('h:i:s A', strtotime($show['stop'])));
-      if(in_array(filter_filename((string)$show->title), skipShows())){
-          logw('skipping show, found in skip list: '.(string)$show->title);
-          if($loop == false){ exit; }
-          skipShow($channel, $show);
-          sleep(1);
-          return record($channel, $tuner);
-      }
-      
-      $elapsed = time()-strtotime($show['start']);
-      $maxLateStart = 30;
-      if($elapsed > $maxLateStart){
-          logw('skipping recording, started too late: '.$elapsed.' > '.$maxLateStart);
-          if($loop == false){ exit; }
-          skipShow($channel, $show);
-          sleep(1);
-          return record($channel, $tuner);
-      }
-      $duration = strtotime($show['stop'])-time();
-      //echo 'Duration: '.$duration;
-      if($duration < 5*60){
-        logw('skipping recording, only 5 minutes left');
-        if($loop == false){ exit; }
-        skipShow($channel, $show);
-        sleep(1);
-        return record($channel, $tuner);
-      }
-      
-      $destination = buildFilePath($channel, $show);
-      $dir = pathinfo($destination, PATHINFO_DIRNAME).'/';
-      if(file_exists($dir) == false || is_dir($dir) == false){
-          mkdir($dir, 0777, $recursive=true);
-      }
-  
-      ffmpeg($tuner, $channel, $show, $duration, $destination);
-      for($i=0; $i<3; $i++){
-        if(file_exists($destination)){
-          break;
-        }
-        else{
-          sleep(1);
-        }
-      } 
-      
-      if(file_exists($destination)){
-          logw('file exists in '.$destination);
-          $filesize = filesize($destination);
-          $newPath = str_replace('incomplete/','complete/', $destination);
-            
-          $minMB = 50;
-          if($filesize < $minMB){
-            logw('warning: file size ('.number_format($filesize/1024/1024,2).'MB) is less than '.$minMB.'MB');
-            unlink($destination);
-            return record($channel,$tuner);
-          }
-          else if(strtotime((string)$show['stop'])-time() > 60){
-              unlink($destination);
-              logw('recording ended too early.  deleted the partial file.');
-              if($loop == true){
-                return record($channel,$tuner);
-              }
-          }
-          else if(file_exists($newPath) && filesize($newPath) < filesize($destination)){ // overwrite if new file is larger
-            unlink($newPath);
-            logw('deleting previous file because it\'s smaller and has the same name.');
-          }
-          $dir = pathinfo($newPath, PATHINFO_DIRNAME).'/';
-          if(file_exists($dir) == false || is_dir($dir) == false){            
-            if(mkdir($dir, 0777, $recursive=true)){
-                logw('made directory '.$dir);
-            };
-          }
-          logw('moving file from ['.$destination.'] to ['.$newPath.']');
-          if(rename($destination, $newPath)){
-            logw('file moved from /incomplete/ folder to /complete/ folder');                
-            $folder = pathinfo($destination, PATHINFO_DIRNAME);
-            logw('incomplete folder: '.$folder);
+      do{
+          transferLogFile(date('Y-m-d').'['.$channel.'].html');
+          logw('<hr>record function called, channel: '.$channel.', tuner: '.$tuner.', loop: '.$loop);
+          //logw('PeakPageFileUsage in bytes: '.getMemoryUsage());
           
-            if(file_exists($folder) && is_dir($folder)){
-              array_map('unlink', array_filter((array) glob($folder.'/*')));
-              $fileCount = count(array_diff(scandir($folder),array('.','..')));
-              logw('files in folder: '.$fileCount);
-                
-              if(rmdir($folder)){
-                  logw('deleted empty folder in /incomplete/ '.$folder);
-              }
-            }
-            print("\r\n");
-            logw('about to record the next program.<hr>');            
+          if($tuner == null){
+            $tuner = getTunerWithFreeSlot();
           }
-          else{
-              logw('failed to move file to /complete/ folder');
+          if($tuner == false){ // delay?
+            errorRepeatLoop('no free tuner slots available');
           }
-      } else{
-          logw('destination file does not exist: '.$destination);
-      }
+          else if(isRecording($channel)){ // ffmpeg connected to tuner.  what about skipping?
+            errorRepeatLoop('already recording channel '.$channel);
+          }
+          else if(!isChannelInLineUp($tuner, $channel)){ // try another open tuner?
+            errorRepeatLoop('channel not in lineup of tuner '.$tuner);
+          }
+          else if(filemtime('D:/tv/programs/atsc-guide.xml') + 2*24*60*60 < time()){
+            errorRepeatLoop('epg is too old.'); // download new epg?  find min/max last show time for channels
+          }
+          $show = findCurrentShow($channel);
+          if($show == false){
+            errorRepeatLoop('failed to find current show on channel.');
+          }
+          logw('show ends at time: '.date('h:i:s A', strtotime($show['stop'])));
+          if(in_array(filter_filename((string)$show->title), skipShows())){
+            logw('skipping show, found in skip list: '.(string)$show->title);
+            if($loop == false){ exit; }
+            skipShow($channel, $show);
+            sleep(1);
+            continue;
+          }
       
-      if($loop == true){
-        return record($channel,$tuner);
+          $elapsed = time()-strtotime($show['start']);
+          $maxLateStart = 60;
+          if($elapsed > $maxLateStart){
+            logw('skipping recording, started too late: '.$elapsed.' > '.$maxLateStart);
+            if($loop == false){ exit; }
+            skipShow($channel, $show);
+            sleep(1);
+            continue;
+          }
+          
+          $duration = strtotime($show['stop'])-time();
+          //echo 'Duration: '.$duration;
+          if($duration < 5*60){
+            logw('skipping recording, only 5 minutes left');
+            if($loop == false){ exit; }
+            skipShow($channel, $show);
+            sleep(1);
+            continue;
+          }
+        
+          $destination = buildFilePath($channel, $show);
+          logw('Destination: '.$destination);
+          $dir = pathinfo($destination, PATHINFO_DIRNAME).'/';
+          if(file_exists($dir) == false || is_dir($dir) == false){
+            mkdir($dir, 0777, $recursive=true);
+          }
+          //logw('PeakPageFileUsage in bytes: '.getMemoryUsage());
+          ffmpeg($tuner, $channel, $show, $duration, $destination);
+          //logw('PeakPageFileUsage in bytes: '.getMemoryUsage());
+          for($i=0; $i<3; $i++){
+            if(file_exists($destination)){
+                break;
+            }
+            else{
+                sleep(1);
+            }
+          } 
+      
+          if(file_exists($destination)){
+            logw('file exists in '.$destination);
+            $filesize = filesize($destination);
+            $newPath = str_replace('incomplete/','complete/', $destination);
+            
+            $minMB = 50;
+            if($filesize < $minMB){
+                logw('warning: file size ('.number_format($filesize/1024/1024,2).'MB) is less than '.$minMB.'MB');
+                unlink($destination);
+                continue;
+            }
+            else if(strtotime((string)$show['stop'])-time() > 60){
+                unlink($destination);
+                logw('recording ended too early.  deleted the partial file.');
+                if($loop == true){
+                    continue;
+                }
+            }
+            else if(file_exists($newPath) && filesize($newPath) < filesize($destination)){ // overwrite if new file is larger
+                unlink($newPath);
+                logw('deleting previous file because it\'s smaller and has the same name.');
+            }
+            $dir = pathinfo($newPath, PATHINFO_DIRNAME).'/';
+            if(file_exists($dir) == false || is_dir($dir) == false){            
+                if(mkdir($dir, 0777, $recursive=true)){
+                    logw('made directory '.$dir);
+                };
+            }
+            logw('moving file from ['.$destination.'] to ['.$newPath.']');
+            if(rename($destination, $newPath)){
+                logw('file moved from /incomplete/ folder to /complete/ folder');                
+                $folder = pathinfo($destination, PATHINFO_DIRNAME);
+                logw('incomplete folder: '.$folder);
+          
+                /*if(file_exists($folder) && is_dir($folder)){
+                    array_map('unlink', array_filter((array) glob($folder.'/*')));
+                    $fileCount = count(array_diff(scandir($folder),array('.','..')));
+                    logw('files in folder: '.$fileCount);
+                
+                    if(rmdir($folder)){
+                        logw('deleted empty folder in /incomplete/ '.$folder);
+                    }
+                }*/
+                print("\r\n");
+                logw('about to record the next program.<hr>');            
+            }
+            else{
+                logw('failed to move file to /complete/ folder');
+            }
+          } 
+          else{
+            logw('destination file does not exist: '.$destination);
+          }
+          //logw('PeakPageFileUsage: '.getMemoryUsage());
       }
+      while($loop == true);
   }
   
   function recordingStatusLine($mode='Skipping', $channel, $show, $metadata, $filesize='0.0'){
@@ -732,9 +778,10 @@
         while (time() < $stopTime){
             $statusLine = recordingStatusLine('Skipping', $channel, $show, $metadata, $filesize='0.0');
             if(time() % 60 == 0){
+                logw($statusLine, $silent=true);
                 $statusLine .= "\033[2K\r";
             }
-            logw($statusLine, $silent=true);
+            
             print $statusLine ."\r";
             cli_set_process_title($statusLine);
             sleep(1);                          
@@ -760,7 +807,8 @@
             $cmd[] = '-metadata '.$key.'='.escapeshellarg($val);
         }
     }
-    $cmd[] = '-c copy '.escapeshellarg($destination).' 2>&1';
+    //$cmd[] = '-c copy '.escapeshellarg($destination).' 2>&1';
+    $cmd[] = '-c copy "'.$destination.'" 2>&1';
     
     $cmd = implode(' ',$cmd);
     
@@ -806,12 +854,12 @@
                     $end = strpos($line, 'KiB');
                     $size = number_format(trim(substr($line, 5, $end-5))/1024,1);
                     $statusLine = recordingStatusLine('Ripping', $channel, $show, $metadata, $filesize=$size);
-                    logw($statusLine, $silent=true);
                     if(time() % 60 == 0){
+                        logw($statusLine, $silent=true);
                         $statusLine .= "\033[2K\r";
                     }
                     print $statusLine ."\r";
-                    //cli_set_process_title($statusLine);
+                    cli_set_process_title($statusLine);
                     flush();
                 }
                 else if(strstr($line, 'HTTP error')){
@@ -834,6 +882,7 @@
     fwrite($fp, '</pre>');
     //echo '</pre>';
     fclose($fp);
+    logw('<pre>'.print_r(proc_get_status($process),true).'</pre>');
     logw('end of ffmpeg()');
   }
   
@@ -991,10 +1040,19 @@
                   }
                   else{
                       logw('video is good and not in use.');
+                      $newPath = str_replace('D:/tv/incomplete/','D:/tv/complete/', $path);
+                      $newParentFolder = pathinfo($newPath, PATHINFO_DIRNAME);
+                      if(!file_exists($newParentFolder)){
+                          mkdir($newParentFolder);
+                      }
+                      $mTime = filemtime($newParentFolder);
+                      logw('moved to /complete/: '.rename($path,$newPath));
+                      touch($newParentFolder, $mTime);
                   }
               }
           }
       }
+      deleteEmptySubFolders();
   }
   
   function checkVideoFile($path=null){
@@ -1009,17 +1067,19 @@
       return true;
   }
   
-  function deleteEmptyIncompleteFolders(){
-      transferLogFile(pathinfo($log['path'], PATHINFO_DIRNAME).'/deletions_'.date('Y-m-d').'.html');
-      $base = 'D:/tv/incomplete/';
-      logw('deleting empty folders');
-      $folders = array_values(array_diff(scandir($base), array('.','..')));
-      foreach($folders as $folder){
-          $innerFolder = array_values(array_diff(scandir($base.$folder), array('.','..')));
-          if(count($innerFolder) == 0){
-              logw('deleting empty folder, '.$base.$folder.': '.(rmdir($base.$folder)?'success':'failed'));
-          }
-      }      
+  function deleteEmptySubFolders(){
+      transferLogFile('deletions_'.date('Y-m-d').'.html');
+      foreach(array('incomplete','complete') as $baseFolder){
+           $base = 'D:/tv/'.$baseFolder.'/';
+           logw('deleting empty folders');
+           $folders = array_values(array_diff(scandir($base), array('.','..')));
+           foreach($folders as $folder){
+                $innerFolder = array_values(array_diff(scandir($base.$folder), array('.','..')));
+                if(count($innerFolder) == 0){
+                    logw('deleting empty folder, '.$base.$folder.': '.(rmdir($base.$folder)?'success':'failed'));
+                }
+           }     
+      }
   }
   
   function hdhomerun_config($args=''){
@@ -1039,8 +1099,8 @@
   function deleteOldestVideos(){
       // https://www.php.net/manual/en/function.touch.php
       // to leave the folder modified times as they were
-      transferLogFile(pathinfo($log['path'], PATHINFO_DIRNAME).'/deletions_'.date('Y-m-d').'.html');
-      $minFreeSpacePercent = 10;
+      transferLogFile('deletions_'.date('Y-m-d').'.html');
+      $minFreeSpacePercent = 20;
       $base = 'D:/tv/complete/';
       
       $videoFiles = array();
@@ -1058,7 +1118,10 @@
           foreach(array_keys($videoFiles) as $videoFilePath){
               if(freeSpacePercent('D:') < $minFreeSpacePercent){
                 if(file_exists($videoFilePath)){
+                  $parentFolder = pathinfo($videoFilePath, PATHINFO_DIRNAME);
+                  $mTime = filemtime($parentFolder);
                   unlink($videoFilePath);
+                  touch($parentFolder, $mTime);
                   if(!file_exists($videoFilePath)){
                       array_push($deletedFiles, $videoFilePath);
                       logw('deleted file: '.$videoFilePath);
