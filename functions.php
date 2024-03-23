@@ -50,21 +50,6 @@
       logw('calling function: '.$argv[1],$silent=true);
   }
   
-  function getMemoryUsage(){
-      $output = array();
-      exec('wmic process where processid='.getmypid().' get PeakPageFileUsage /format:csv 2>&1',$output);
-      
-      $keys = str_getcsv($output[1]);
-      $vals = str_getcsv($output[2]);
-      $assoc = array();
-      for($i=0; $i<count($keys); $i++){
-          $assoc[$keys[$i]] = $vals[$i];
-      }
-      
-      //echo '<pre>'.print_r($assoc,true).'</pre>';
-      return number_format($assoc['PeakPageFileUsage']/1024,1).'MB';
-  }
-  
   function writeDbStatus($channel, $message){
       $db = mysqli_connect('127.0.0.1', 'root','','dvr');
       $message = mysqli_real_escape_string($db, $message);
@@ -110,24 +95,28 @@
   }
   
   function printHomePage(){
-      echo printTunersWatching();
-      echo 'Processes running: '.count(getProcesses('php')).' | Recording: '.count(getProcesses('ffmpeg')).'<br>';
-      echo 'Available Memory: '.getFreeMemory().'MB | Free Disk Space: '.getFreeDiskSpace('D:').'<br>';
-      echo '<hr>';
-      echo 'Functions: <a href="?recordAllFavoriteChannels" target="local">Record Fav. Channels</a> | ';
-      echo '<a href="?closeAllRecordings" target="local">Close All Recordings</a> | ';
-      echo '<a href="?restartAllRecordings" target="local">Restart All Recordings</a> | ';
-      echo '<a href="?printWhatsOnNow" target="local">Whats On Now?</a> | ';
-      echo '<a href="?whatsOnAllTunerChannels" target="local">Whats On all EPG (Tuners)?</a> | ';
-      echo '<a href="?detectChannelsAllTuners" target="local">Detect Channels</a> | ';
-      echo '<a href="?clearData" target="local">Clear Data</a> | ';
-      echo '<a href="?updateElectronicProgramGuide" target="local">Update EPG</a> | ';
-      echo '<a href="?deleteEmptySubFolders" target="local">Delete Empty SubFolders</a> | ';
-      echo '<iframe name="local" style="width: 100%; height: 75%;" src="?printWhatsOnNow"></iframe>';
+      echo 
+      printTunersWatching()
+      .'Processes running: '.count(getProcesses('php')).' | Recording: '.count(getProcesses('ffmpeg')).'<br>'
+      .'Available Memory: '.getFreeMemory().'MB | Free Disk Space: '.getFreeDiskSpace('D:').'<br>'
+      .'<hr>'
+      .'Functions: '
+      .'<a href="?recordAllFavoriteChannels" target="local">Record Fav. Channels</a> | '
+      .'<a href="?closeAllRecordings" target="local">Close All Recordings</a> | '
+      .'<a href="?restartAllRecordings" target="local">Restart All Recordings</a> | '
+      .'<a href="?printWhatsOnNow" target="local">Whats On Now?</a> | '
+      .'<a href="?whatsOnAllTunerChannels" target="local">Whats On all EPG (Tuners)?</a> | '
+      .'<a href="?detectChannelsAllTuners" target="local">Detect Channels</a> | '
+      .'<a href="?clearData" target="local">Clear Data</a> | '
+      .'<a href="?updateElectronicProgramGuide" target="local">Update EPG</a> | '
+      .'<a href="?deleteEmptySubFolders" target="local">Delete Empty SubFolders</a> | '
+      .'<a href="?deleteGlitchyIncompleteVideos" target="local">Delete Glitchy Incomplete Videos</a> | '
+      .'<iframe name="local" style="width: 100%; height: 75%;" src="?printWhatsOnNow"></iframe>';
   }
   
   function printCliUsage(){
-      echo 'Enter command line arguments to use.';
+      echo 'Usage: php functions.php command arg arg arg...'."\r\n";
+      echo 'Example: php functions.php record 5.2 10.0.0.2'."\r\n";
   }
   
   function shutdownFunction(){
@@ -148,57 +137,110 @@
       return number_format(disk_free_space($drive)/1024/1024/1024,1).'GB';
   }
   
+  function getChannelsRunning(){
+      $processLine = "";
+      $output = array();
+      $program = "php.exe";
+      $args = "";
+      exec('wmic path win32_process where "Caption like \'%php.exe%\' and CommandLine like \'%functions.php%record%\'" get caption, processid, parentprocessid, commandline /format:csv', $output, $return);
+      
+      $channels = array();
+      if(count($output) > 1){
+        $output = csvToAssocArray(array_slice($output, 1));
+        foreach($output as $key => $val){
+            $stringParts = preg_split('/\s+/', trim($val['CommandLine']));
+            //print_r($stringParts);
+            //exit;
+            if(count($stringParts) >= 3 && $stringParts[2] == 'record'){
+                $channels[] = $stringParts[3];
+            }
+        }
+      }
+      else{
+          return false;
+      }
+      return $channels;
+  }
+  
+  function csvToAssocArray($csvArr){
+      $assoc = array();
+      $header = str_getcsv($csvArr[0]);
+      for($i=1; $i<count($csvArr); $i++){
+        $line = str_getcsv($csvArr[$i]);
+        for($j=0; $j<count($line); $j++){
+            $assoc[$i][$header[$j]] = $line[$j];
+        }
+      }
+      return $assoc;
+  }
+  
   function scanShowsAndRecordCli(){
-    while(true){
+    do{
+        while(time() % (15*60) > 3){ // every 15 minutes :00 :15 :30 :45
+            if(time() % 60 == 0){
+                logw('sleeping '.time());
+            }
+            sleep(1);            
+        }        
+        transferLogFile(date('Y-m-d').'-scanShowsAndRecord.html');
         $scanShows = explode("\r\n", file_get_contents('D:/tv/settings/scanshow.list'));
         logw('<pre>Scan shows: '.print_r($scanShows,true).'</pre>');
-
-        $alreadyTunedChannels = array();
-        foreach(getChannelsTuned() as $tunedChannels){
-            $alreadyTunedChannels[] = $tunedChannels['number'];
-        }
         
+        $runningChannels = getChannelsRunning();
+        $tuners = getTunerListPerSlot();
+        $i=0;
         foreach(whatsOnNow() as $channel => $showTitle){
             if(in_array($showTitle, $scanShows)){
                 logw('found show '.$showTitle.' currently on epg of tuner channels. channel '.$channel);
-                if(!in_array($channel, $alreadyTunedChannels)){
-                    $tuner = getTunerWithFreeSlot(); 
+                //logw('running channels: '.print_r($runningChannels,true));
+                if(!in_array($channel, $runningChannels)){
+                    if($i > count($tuners)){
+                        break;
+                    }
+                    $tuner = $tuners[$i++];
                     if($tuner != false){
                         logw('Tuner with free slot: '.$tuner);
                         $output = array();
-                        $cmd = 'D:/tv/programs/PSTools/PsExec64.exe -accepteula -nobanner -i 0 -d "c:/xampp/php/php.exe" "c:/xampp/htdocs/tv/functions.php" record '.$channel.' '.$tuner.' noloop 2>&1';
+                        $cmd = 'start c:/xampp/php/php.exe c:/xampp/htdocs/tv/functions.php record '.$channel.' '.$tuner.' noloop 2>&1';
                         logw('Command: '.$cmd);
-                        exec($cmd, $output, $return);
-                        //sleep(1);
-                        logw('<pre>Command output: '.print_r($output,true).'</pre><hr>');
+                        $descriptorspec = array(
+                           0 => array("pipe", "r"),   // stdin is a pipe that the child will read from
+                           1 => array("pipe", "w"),   // stdout is a pipe that the child will write to
+                           2 => array("pipe", "w")    // stderr is a pipe that the child will write to
+                        );
+                        $process = proc_open($cmd, $descriptorspec, $pipes);
                      }
                      else{
                          logw('no tuners available with free slots');
                      }
                 }
                 else{
-                    logw('already recording channel from scanshow');
+                    logw('already recording/skipping this channel '.$channel.' and will not start another process');
                 }
             }
             else{
                 //logw('show '.$showTitle.' not found on available tuner channels.');
             }
         }
-        while(date('s') % 5 != 0){
-            sleep(1);
-        }
         sleep(1);
-    }
+    } while(true);
   }
   
-  function transferLogFile($newLogFile){
+  function transferLogFile($newLogFile,$createNew=false){
       global $log;
       if($newLogFile != pathinfo($log['path'], PATHINFO_BASENAME)){
-          $oldLogData = file_get_contents($log['path']);
-          unlink($log['path']);
+          if($createNew == false){
+            $oldLogData = file_get_contents($log['path']);
+            unlink($log['path']);
+          }
           $log['path'] = pathinfo($log['path'], PATHINFO_DIRNAME).'/'.$newLogFile;
-          file_put_contents($log['path'], $oldLogData, FILE_APPEND);
-          logw('log file changed to: '.$log['path']);
+          if($createNew == false){
+            file_put_contents($log['path'], $oldLogData, FILE_APPEND);
+            logw('log file changed to: '.$log['path']);
+          }
+          else{
+              logw('new log file switched to: '.$log['path']);
+          }          
       }
       else{
           logw('reusing existing log file');
@@ -227,24 +269,16 @@
   function recordAllFavoriteChannels(){
     $slots = getTunerListPerSlot();
     $channels = array_unique(array_values(getChannelsToRecord()));
-    //shuffle($slots);
-    logw($slots);
-    logw($channels);
     for($i=0; $i<count($slots)-1 && $i<count($channels); $i++){
         $output = array();
-        $cmd = 'D:/tv/programs/PSTools/PsExec64.exe -accepteula -nobanner -i 0 -d "c:/xampp/php/php.exe" "c:/xampp/htdocs/tv/functions.php" record '.$channels[$i].' '.$slots[$i].' 2>&1';
+        //$cmd = 'D:/tv/programs/PSTools/PsExec64.exe -accepteula -nobanner -i 0 -d "c:/xampp/php/php.exe" "c:/xampp/htdocs/tv/functions.php" record '.$channels[$i].' '.$slots[$i].' 2>&1';
+        $cmd = 'start c:/xampp/php/php.exe "c:/xampp/htdocs/tv/functions.php" record '.$channels[$i].' '.$slots[$i].' 2>&1';
         $descriptorspec = array(
            0 => array("pipe", "r"),   // stdin is a pipe that the child will read from
            1 => array("pipe", "w"),   // stdout is a pipe that the child will write to
            2 => array("pipe", "w")    // stderr is a pipe that the child will write to
         );
-
         $process = proc_open($cmd, $descriptorspec, $pipes);
-        //if($i > 0 && $slots[$i] == $slots[$i-1]){
-         sleep(1);
-        //}
-        //exec($cmd, $output, $return);
-        //echo print_r($output,true).'<hr>';
     }
   }
   
@@ -422,15 +456,19 @@
   
   function printWhatsOnNow(){
       $whatsOn = whatsOnNow();
-      $channels = getChannelsWatching();
+      $channelsWatching = getChannelsWatching();
+      $channelsRunning = getChannelsRunning();
       $output = print_r($whatsOn,true);
       $lines = explode("\n", $output);
       foreach($lines as $key => $line){
-          foreach($channels as $channel){
-              if(strstr($line, '['.$channel.']')){
-                  $lines[$key] = '<font style="background: lightyellow; font-weight: bold;">'.$line.' (Recording)</font>';
-                  continue 2;
-              }
+          if(strstr($line,'[') && strstr($line, ']')){
+            $channel = substr($line, strpos($line, '[',)+1, strpos($line, ']')-strpos($line, '[')-1);
+            if(in_array($channel, $channelsWatching)){
+                $lines[$key] = '<font style="background: #f7ffe6; font-weight: bold;">'.$line.' (Recording)</font>';
+            }
+            else if(in_array($channel, $channelsRunning)){
+                  $lines[$key] = '<font style="background: lightyellow; font-weight: bold;">'.$line.' (Skipping)</font>';
+            }
           }
       }
       $lines = implode("\n", $lines);
@@ -630,9 +668,8 @@
   
   function record($channel, $tuner=null, $loop=true){
       do{
-          transferLogFile(date('Y-m-d').'['.$channel.'].html');
-          logw('<hr>record function called, channel: '.$channel.', tuner: '.$tuner.', loop: '.$loop);
-          //logw('PeakPageFileUsage in bytes: '.getMemoryUsage());
+          transferLogFile(date('Y-m-d').'['.$channel.'].html',$createNew=true);
+          logw('<hr>record function called, channel: '.$channel.', tuner: '.$tuner.', loop: '.($loop?'true':'false'));
           
           if($tuner == null){
             $tuner = getTunerWithFreeSlot();
@@ -688,9 +725,9 @@
           if(file_exists($dir) == false || is_dir($dir) == false){
             mkdir($dir, 0777, $recursive=true);
           }
-          //logw('PeakPageFileUsage in bytes: '.getMemoryUsage());
+
           ffmpeg($tuner, $channel, $show, $duration, $destination);
-          //logw('PeakPageFileUsage in bytes: '.getMemoryUsage());
+
           for($i=0; $i<3; $i++){
             if(file_exists($destination)){
                 break;
@@ -753,7 +790,6 @@
           else{
             logw('destination file does not exist: '.$destination);
           }
-          //logw('PeakPageFileUsage: '.getMemoryUsage());
       }
       while($loop == true);
   }
@@ -886,47 +922,6 @@
     logw('end of ffmpeg()');
   }
   
-  function handleVideoErrors(){
-    exec('D:/tv/programs/Handle/handle64.exe -accepteula "Y:/tv/incomplete/Archie Bunker\'s Place/Archie Bunker\'s Place - S03E26 - Death of a Lodger - [ANTENNA][v11.2].mp4"', $output, $return);
-    print_r($output);
-    echo number_format(microtime(true)-$start). ' seconds';
-    exit;
-    $log['path'] = 'D:/tv/logs/videos_error_deletion.html';
-    
-    $folder = 'D:/tv/complete/ES.TV/';
-    $files = scandir($folder);
-    $files = array_values(array_diff($files,array('.','..')));
-    //print_r($files);
-    logw('<hr>Starting video file check/delete function');
-    foreach($files as $file){
-        echo filemtime($folder.$file);
-        $output = array();
-        $cmd = 'D:/tv/programs/ffmpeg.exe -v error -i "'.$folder.$file.'" -map 0:1 -f null - 2>&1';
-        logw('command: '.$cmd);
-        exec($cmd, $output, $return);
-        if(!empty($output)){
-            logw('<pre>Output:'.print_r($output,true).'</pre>');
-        }
-        $stdouterr = implode("\n", $output);
-        logw('return code: '.$return);
-        if(stristr($stdouterr, 'Invalid data found when processing input') || (substr_count($stdouterr,'Error') + substr_count($stdouterr,'error')) > 20){
-            logw('contains video/audio stream errors: '.$file);
-            if(unlink($folder.$file)){
-                logw('deleted file');
-                if(count(array_diff(scandir($folder),array('.','..'))) == 0){
-                    rmdir($folder);
-                    logw('deleted empty folder');
-                }
-            }
-        }
-        else{
-            logw('did not detect video/audio stream errors: '.$file);
-            logw('keeping file');
-        }
-        //print_r($output);
-    }      
-  }
-  
   function getChannelsToRecord(){
       $path = "D:/tv/settings/channels.json";
       $channels = json_decode(file_get_contents($path),true);
@@ -1010,13 +1005,12 @@
   }
   
   function isFileInUse($path=null){
-    //$path = 'Y:/tv/incomplete/The Best of the Joy of Painting/The Best of the Joy of Painting - S40E23 - Daisy Delight - [CREATE][v21.2].mp4';
     $output = array();
     exec('D:/tv/programs/Handle/handle64.exe -nobanner -accepteula -v '.escapeshellarg($path), $output, $return);
     //echo '<pre>'.print_r($output, true).'<pre>';
     if(count($output) > 1){
-        $line = str_getcsv($output[1]);
-        echo '<pre>'.print_r($line, true).'<pre>';
+        //$line = str_getcsv($output[1]);
+        //echo '<pre>'.print_r($line, true).'<pre>';
         //echo 'file is in use';
         return true;
     }
@@ -1046,7 +1040,16 @@
                           mkdir($newParentFolder);
                       }
                       $mTime = filemtime($newParentFolder);
-                      logw('moved to /complete/: '.rename($path,$newPath));
+                      $renamed = false;
+                      try{
+                          $renamed = @rename($path,$newPath);
+                      }
+                      catch(Exception $e){
+                          logw('Exception: '.$e->getMessage());
+                      }
+                      if($renamed){
+                        logw('moved to /complete/: '.$renamed);
+                      }
                       touch($newParentFolder, $mTime);
                   }
               }
@@ -1097,8 +1100,6 @@
   }
   
   function deleteOldestVideos(){
-      // https://www.php.net/manual/en/function.touch.php
-      // to leave the folder modified times as they were
       transferLogFile('deletions_'.date('Y-m-d').'.html');
       $minFreeSpacePercent = 20;
       $base = 'D:/tv/complete/';
@@ -1138,22 +1139,103 @@
       
   }
   
-      /*$delay = 99999;
-    do{
-        $min = date('i');
-        $sec = date('s');
-        
-        if($min > 30){
-            $delay = (60 - $min)*60+(60-$sec);
-        }
-        else if($min <= 30){
-            $delay = (30 - $min)*60+(60-$sec);
-        }
-        logw('sleeping for '.$delay.' seconds<br>');
-        if($delay > 10){
-            sleep(1);
-        }
-        
-    }while($delay > 10);*/
+  function scaleDownMedia(){
+    $inputFilePath = 'C:/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
+    $outputFilePath = 'C:/shrank-Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
+    
+    $cmd = array();
+    $cmd[] = 'D:/tv/programs/ffmpeg.exe';
+    $cmd[] = '-hide_banner -y';
+    $cmd[] = '-threads 32';
+    
+    //$cmd[] = '-vb 50M';
+    $cmd[] = '-i "'.$inputFilePath.'"';
+    //$cmd[] = '-max_muxing_queue_size 1024';
+    $cmd[] = '-vf scale=iw/2:ih/2';
+    $cmd[] = '-an';
+    $cmd[] = '"'.$outputFilePath.'"';
+    $cmd[] = '2>&1';
+    $cmd = implode(' ', $cmd);
+    //echo $command;
+    //exit;
+    $output = array();
+    exec($cmd, $output, $returnVar);
+    echo 'Running command: '.$cmd.'<br>';
+    exit;
+    echo '<pre>'.print_r($output, true).'</pre><br>';
+    exit;
+    
+    if(file_exists($outputFilePath) && filesize($outputFilePath) > 0){
+        echo 'conversion successful! '.$outputFilePath.' is '.filesize($outputFilePath).' bytes <br><hr>';
+        return true;
+    }
+    else{
+        echo 'conversion failed! '.$outputFilePath.' is '.filesize($outputFilePath).' bytes <br><hr>';
+        return false;
+    }
+    
+  }
+  
+  function findCommercial(){
+    $videoPath = 'D:/tv/dead/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
+    $imagePath = 'D:/tv/dead/resize_test.jpg';
+    $startTime = '00:00:01';
+    $duration = '2:00:00';
+      
+    $commercials = array();
+    $cmd = array();
+    $cmd[] = 'D:/ffmpeg.exe';
+    $cmd[] = '-hide_banner -y';
+    $cmd[] = ' -ss '.$startTime;//.' -t '.$duration;
+    $cmd[] = '-i "'.$videoPath.'"';
+    $cmd[] = '-loop 1';
+    $cmd[] = '-i "'.$imagePath.'"';
+    $cmd[] = '-an -filter_complex "blend=difference:shortest=1,blackframe=98:32"';
+    $cmd[] =  '-f null -';
+    $cmd[] = '2>&1';
+    $cmd = implode(' ',$cmd);
+    
+    $output = array();
+    exec($cmd, $output, $return);
+    echo '<pre>'.print_r($output,true).'</pre>';
+  }
+  
+  function cutOutCommercial(){
+      $start = 360;
+      $stop = $start + 30;
+      $input = 'D:/tv/dead/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
+      
+      $cmd = array();
+      $cmd[] = 'D:/tv/programs/ffmpeg.exe';
+      $cmd[] = '-hide_banner -y';
+      $cmd[] = '-i "'.$input.'"';
+      $cmd[] = '-filter_complex "[0:v]trim=duration=30[a]; [0:v]trim=start=40:end=50,setpts=PTS-STARTPTS[b]; [a][b]concat[c]; [0:v]trim=start=80,setpts=PTS-STARTPTS[d]; [c][d]concat[out1]"';
+      $cmd[] = '-map [out1] D:/tv/dead/out.mp4';
+      $cmd[] = '2>&1';
+      
+      $cmd = implode(' ', $cmd);
+      
+      //print_r($cmd);
+      //exit;
+      
+      $output = array();
+      exec($cmd, $output, $return);
+      echo '<pre>'.print_r($output,true).'</pre>';
+  }
+  
+  function resizeImage(){
+      $output = array();
+      $image = 'D:/tv/dead/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4_20240316_194632.970.jpg';
+      $cmd = array();
+      $cmd[] = 'D:/tv/programs/ffmpeg.exe';
+      $cmd[] = '-i "'.$image.'"';
+      $cmd[] = '-vf scale=704:480';
+      $cmd[] = 'D:/tv/dead/resize_test.jpg';
+      
+      $cmd = implode(' ', $cmd);
+      
+      exec($cmd, $output, $return);
+      echo '<pre>'.print_r($output,true).'</pre>';
+  }
   
 ?>
