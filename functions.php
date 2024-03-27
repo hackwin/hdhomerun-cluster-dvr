@@ -174,6 +174,10 @@
       return $assoc;
   }
   
+  function getScanShows(){
+      return explode("\r\n", file_get_contents('D:/tv/settings/scanshow.list'));
+  }
+  
   function scanShowsAndRecordCli(){
     do{
         while(time() % (15*60) > 3){ // every 15 minutes :00 :15 :30 :45
@@ -183,7 +187,7 @@
             sleep(1);            
         }        
         transferLogFile(date('Y-m-d').'-scanShowsAndRecord.html');
-        $scanShows = explode("\r\n", file_get_contents('D:/tv/settings/scanshow.list'));
+        $scanShows = getScanShows();
         logw('<pre>Scan shows: '.print_r($scanShows,true).'</pre>');
         
         $runningChannels = getChannelsRunning();
@@ -267,6 +271,7 @@
   }
   
   function recordAllFavoriteChannels(){
+    
     $slots = getTunerListPerSlot();
     $channels = array_unique(array_values(getChannelsToRecord()));
     for($i=0; $i<count($slots)-1 && $i<count($channels); $i++){
@@ -280,6 +285,8 @@
         );
         $process = proc_open($cmd, $descriptorspec, $pipes);
     }
+    sleep(5);
+    scanShowsAndRecordCli();
   }
   
   function restartAllRecordings(){
@@ -1113,6 +1120,8 @@
       asort($videoFiles);
       logw('total video files: '.count($videoFiles));
       
+      $scanShows = getScanShows();
+      
       $deletedFiles = array();
       if(freeSpacePercent('D:') < $minFreeSpacePercent){
         logw('free space is now '.freeSpacePercent('D:').'% and min free space percent must be '.$minFreeSpacePercent.'% or more');
@@ -1120,6 +1129,23 @@
               if(freeSpacePercent('D:') < $minFreeSpacePercent){
                 if(file_exists($videoFilePath)){
                   $parentFolder = pathinfo($videoFilePath, PATHINFO_DIRNAME);
+                  $filename = pathinfo($videoFilePath, PATHINFO_BASENAME);
+                  
+                  foreach($scanShows as $scanShow){
+                    if(strstr($filename, $scanShow)){
+                        logw('found "save show" '.$filename);
+                        $destinationFolder = str_replace('D:/tv/complete/', 'D:/tv/saved/', $parentFolder);
+                        if(!file_exists($destinationFolder)){                            
+                            logw('making directory '.$destinationFolder.' '.(mkdir($destinationFolder,0777,$recursive=true)?'yes':'no'));
+                        }
+                        $newVideoPath = $destinationFolder.'/'.$filename;
+                        if(!file_exists($newVideoPath)){
+                            logw('moved to saved folder: '.(rename($videoFilePath, $newVideoPath)?'yes':'no'));
+                        }
+                        continue 2;
+                    }
+                  }
+                  
                   $mTime = filemtime($parentFolder);
                   unlink($videoFilePath);
                   touch($parentFolder, $mTime);
@@ -1139,9 +1165,30 @@
       
   }
   
-  function scaleDownMedia(){
-    $inputFilePath = 'C:/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
-    $outputFilePath = 'C:/shrank-Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
+  function getVideoResolution($videoPath){
+      $cmd = array();
+      $cmd[] = 'D:/tv/programs/ffprobe.exe -v error -select_streams v:0 -show_entries stream=width,height -of default=nw=1:nk=1';
+      //$cmd[] = '"D:/tv/de-ad/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4"';
+      $cmd[] = '"'.$videoPath.'"';
+      $cmd[] = '2>&1';
+      $cmd = implode(' ', $cmd);
+      $output = array();
+      logw('Running command: '.$cmd);
+      exec($cmd, $output, $return);
+      logw('<pre>'.print_r($output, true).'</pre>');
+      logw('return code: '.$return);
+      if($return == 0 && count($output) == 2){
+          return array('width'=>$output[0], 'height'=>$output[1]);
+      }
+      else{
+          logw('error getting video resolution');
+          return false;
+      }
+  }
+  
+  function scaleDownMedia($inputFilePath){
+    
+    $outputFilePath = 'D:/tv/de-ad/shrank-shows/'.pathinfo($inputFilePath, PATHINFO_BASENAME);
     
     $cmd = array();
     $cmd[] = 'D:/tv/programs/ffmpeg.exe';
@@ -1151,7 +1198,7 @@
     //$cmd[] = '-vb 50M';
     $cmd[] = '-i "'.$inputFilePath.'"';
     //$cmd[] = '-max_muxing_queue_size 1024';
-    $cmd[] = '-vf scale=iw/2:ih/2';
+    $cmd[] = '-vf scale=iw/8:ih/8 -sws_flags bilinear';
     $cmd[] = '-an';
     $cmd[] = '"'.$outputFilePath.'"';
     $cmd[] = '2>&1';
@@ -1161,13 +1208,11 @@
     $output = array();
     exec($cmd, $output, $returnVar);
     echo 'Running command: '.$cmd.'<br>';
-    exit;
     echo '<pre>'.print_r($output, true).'</pre><br>';
-    exit;
     
     if(file_exists($outputFilePath) && filesize($outputFilePath) > 0){
         echo 'conversion successful! '.$outputFilePath.' is '.filesize($outputFilePath).' bytes <br><hr>';
-        return true;
+        return $outputFilePath;
     }
     else{
         echo 'conversion failed! '.$outputFilePath.' is '.filesize($outputFilePath).' bytes <br><hr>';
@@ -1176,66 +1221,253 @@
     
   }
   
-  function findCommercial(){
-    $videoPath = 'D:/tv/dead/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
-    $imagePath = 'D:/tv/dead/resize_test.jpg';
-    $startTime = '00:00:01';
-    $duration = '2:00:00';
-      
-    $commercials = array();
-    $cmd = array();
-    $cmd[] = 'D:/ffmpeg.exe';
-    $cmd[] = '-hide_banner -y';
-    $cmd[] = ' -ss '.$startTime;//.' -t '.$duration;
-    $cmd[] = '-i "'.$videoPath.'"';
-    $cmd[] = '-loop 1';
-    $cmd[] = '-i "'.$imagePath.'"';
-    $cmd[] = '-an -filter_complex "blend=difference:shortest=1,blackframe=98:32"';
-    $cmd[] =  '-f null -';
-    $cmd[] = '2>&1';
-    $cmd = implode(' ',$cmd);
+  function findCommercials($shrankVideoFile){
+    $videoPath = $shrankVideoFile;
+    $imagesPath = 'D:/tv/de-ad/ads/shrank/';
     
-    $output = array();
-    exec($cmd, $output, $return);
-    echo '<pre>'.print_r($output,true).'</pre>';
+    $logFile = 'D:/tv/logs/commercial-finder'.time().'.html';
+    $folder = pathinfo($logFile, PATHINFO_DIRNAME);
+    $fp = fopen($logFile, 'a');
+    
+    $startTime = '00:00:01';
+    //$duration = '2:00:00';
+    
+    $commercialStartTimes = array();
+    foreach(array_diff(scandir($imagesPath), array('.','..')) as $image){
+        $cmd = array();
+        $cmd[] = 'D:/tv/programs/ffmpeg.exe';
+        $cmd[] = '-hide_banner -y';
+        $cmd[] = ' -ss '.$startTime;// .' -t '.$duration;
+        $cmd[] = '-i "'.$videoPath.'"';
+        $cmd[] = '-loop 1';
+        $cmd[] = '-i "'.($imagesPath.$image).'"';
+        $cmd[] = '-an -filter_complex "blend=difference:shortest=1,blackframe=98:32"';
+        //$cmd[] =  '-c:v mpeg4 -f mp4 D:/tv/de-ad/blended.mp4';
+        $cmd[] =  '-f null -';
+        $cmd[] = '2>&1';
+        $cmd = implode(' ',$cmd);
+        logw('Command: '.$cmd);
+        
+        $descriptorspec = array(
+            0 => array('pipe', 'r'),   // stdin is a pipe that the child will read from
+            1 => array('pipe', 'w'),   // stdout is a pipe that the child will write to
+            2 => array('pipe', 'w')    // stderr is a pipe that the child will write to
+        );
+    
+        $process = proc_open($cmd, $descriptorspec, $pipes, $cwd=null, $env_vars=null, $options=array('bypass_shell'=>false));
+    
+        fwrite($fp, '<hr><pre>');
+        $line = '';
+        while (is_resource($process) && !feof($pipes[1])){
+            $s = fread($pipes[1],1);
+            $line .= $s;
+            if($s == "\r"){                
+                if(substr($line, 0, strlen('[Parsed_blackframe_1')) == '[Parsed_blackframe_1'){
+                    //logw('found commercial frame');
+                    $start = strpos($line, 't:')+2;
+                    $end = strpos($line, ' ', $start);
+                    $time = substr($line, $start, $end-$start);
+                    $commercialStartTimes[$image] = $time;
+                    proc_close($process);
+                }
+            
+                $line = '';
+            }
+            fputs($fp, $s);
+        }
+        
+        if(is_resource($process) && proc_get_status($process)['running'] == 1){
+            proc_close($process);
+            sleep(1);
+            if(is_resource($process) && proc_get_status($process)['running'] == 1){
+                proc_terminate($process);
+                sleep(1);
+            }
+        }
+        fwrite($fp, '</pre>');
+    }
+    
+    //echo '</pre>';
+    fclose($fp);
+    asort($commercialStartTimes);
+    //logw('<pre>'.print_r(proc_get_status($process),true).'</pre>');
+    logw('commercialStartTimes: '.'<pre>'.print_r($commercialStartTimes,true).'</pre>');
+    return $commercialStartTimes;
   }
   
-  function cutOutCommercial(){
-      $start = 360;
-      $stop = $start + 30;
-      $input = 'D:/tv/dead/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4';
+  function getCombinedCommercialBlocks($shrankVideoFile){
+      $commercials = findCommercials($shrankVideoFile);
+      /*$commercials = array(
+        'xyzal-allergy-15s.png' => 84.251833,
+        'fanatics-15s.png' => 99.266833,
+        'monster-15s.png' => 114.215100,
+        'fanatics2-15s.png' => 639.640000,
+        'tremfya-30s.png' => 654.655000,
+        'pooph-120s.png' => 684.651633,
+        'alegra-15s.png' => 1485.718567,
+        'lifealert-60s.png' => 1500.700200,
+        'icyhot-15s.png' => 1560.693467,
+        'opendoor-30s.png' => 1575.741833,
+        'nugenix-60s.png' => 1605.705100
+      );*/
       
+      logw('<pre>'.print_r($commercials,true).'</pre>');
+      
+      $indexedArray = array();
+      
+      $times = array_values($commercials);
+      $durations = array_keys($commercials);      
+      
+      for($i=0; $i<count($durations); $i++){
+          $start = strrpos($durations[$i],'-')+1;
+          $end = strpos($durations[$i], 's.png')-$start;
+          $durations[$i] = substr($durations[$i], $start, $end); 
+      }
+      
+      logw('<pre>'.print_r($times,true).'</pre>');
+      logw('<pre>'.print_r($durations,true).'</pre>');
+      
+      $blocks = array();
+      
+      $j=0;
+      for($i=0; $i<count($times); $i++){
+        if($i+1 == count($times)){
+            break;
+        }
+        if(round($times[$i+1] - $times[$i]) == $durations[$i]){
+            logw('blocks '.$i.' and '.($i+1).' are adjacent!');
+            if(!isset($blocks[$j]['commercials'])){
+                $blocks[$j]['commercials'] = 0;
+            }
+            $blocks[$j]['commercials']++;
+            if(!isset($blocks[$j]['first'])){
+                $blocks[$j]['first'] = $i;
+                $blocks[$j]['startTime'] = $times[$blocks[$j]['first']];
+            }
+            $blocks[$j]['last'] = $i+1;
+            
+            $blocks[$j]['stopTime'] = $times[$i+1] + $durations[$i+1];
+        }
+        else{
+            logw('blocks '.$i.' and '.($i+1).' are not adjacent!');
+            $j++;
+        }
+      }
+      
+      logw('<pre>'.print_r($blocks,true).'</pre>');
+      
+      
+      return $blocks;
+  }
+  
+  function cutOutCommercials($shrankVideoFile){
+      //$commercials = findCommercials();
+      
+      $input = $shrankVideoFile;
       $cmd = array();
       $cmd[] = 'D:/tv/programs/ffmpeg.exe';
       $cmd[] = '-hide_banner -y';
       $cmd[] = '-i "'.$input.'"';
-      $cmd[] = '-filter_complex "[0:v]trim=duration=30[a]; [0:v]trim=start=40:end=50,setpts=PTS-STARTPTS[b]; [a][b]concat[c]; [0:v]trim=start=80,setpts=PTS-STARTPTS[d]; [c][d]concat[out1]"';
-      $cmd[] = '-map [out1] D:/tv/dead/out.mp4';
+      
+      $blocks = getCombinedCommercialBlocks($shrankVideoFile);
+      eraseFolderContents('D:/tv/de-ad/parts/');
+      
+      $j=0;
+      for($i=0; $i<count($blocks); $i++){
+          if($i==0){
+              $cmd[] = '-t '.$blocks[0]['startTime'].' -c copy "D:/tv/de-ad/parts/'.++$j.'.mp4"';
+          }
+          if ($i >= 0 && $i < count($blocks)-1){
+              $cmd[] = '-ss '.$blocks[$i]['stopTime'].' -t '.($blocks[$i+1]['startTime']-$blocks[$i]['stopTime']).' -c copy "D:/tv/de-ad/parts/'.++$j.'.mp4"';
+          }
+          if($i == count($blocks)-1){
+              $cmd[] = '-ss '.$blocks[$i]['stopTime'].' -c copy "D:/tv/de-ad/parts/'.++$j.'.mp4"';
+          }
+      }
+      
+      //$cmd[] = '-ss '.$blocks[1]['stopTime'].' -t '.($blocks[2]['startTime']-$blocks[1]['stopTime']).' -c copy "D:/tv/de-ad/parts/'.++$i.'.mp4"';
+      
       $cmd[] = '2>&1';
-      
       $cmd = implode(' ', $cmd);
       
-      //print_r($cmd);
-      //exit;
-      
       $output = array();
+      logw($cmd);
       exec($cmd, $output, $return);
-      echo '<pre>'.print_r($output,true).'</pre>';
+      logw('<pre>'.print_r($output,true).'</pre>');
+      logw('return code: '.$return);
   }
   
-  function resizeImage(){
-      $output = array();
-      $image = 'D:/tv/dead/Batman - S02E60 - The Duo Defy - [Heroes][v9.4].mp4_20240316_194632.970.jpg';
-      $cmd = array();
-      $cmd[] = 'D:/tv/programs/ffmpeg.exe';
-      $cmd[] = '-i "'.$image.'"';
-      $cmd[] = '-vf scale=704:480';
-      $cmd[] = 'D:/tv/dead/resize_test.jpg';
+  function resizeImages($file){
+      $resolution = getVideoResolution($file);
+      logw($resolution);
       
-      $cmd = implode(' ', $cmd);
+      $ads = array_diff(scandir('D:/tv/de-ad/ads/'), array('.','..'));
+      $shrankFolder = 'D:/tv/de-ad/ads/shrank/';
       
-      exec($cmd, $output, $return);
-      echo '<pre>'.print_r($output,true).'</pre>';
+      if(!file_exists($shrankFolder)){
+          mkdir($shrankFolder);
+      }
+      eraseFolderContents($shrankFolder);
+      foreach($ads as $ad){
+          if(is_file('D:/tv/de-ad/ads/'.$ad) && $ad != 'Thumbs.db'){
+              $output = array();
+              $image = 'D:/tv/de-ad/ads/'.$ad;
+              $cmd = array();
+              $cmd[] = 'D:/tv/programs/ffmpeg.exe';
+              $cmd[] = '-hide_banner -y';
+              $cmd[] = '-i "'.$image.'"';
+              $cmd[] = '-vf scale='.$resolution['width'].':'.$resolution['height'].' -sws_flags bilinear';
+              $cmd[] = '"D:/tv/de-ad/ads/shrank/'.$ad.'"';
+              $cmd[] = '2>&1';
+              $cmd = implode(' ', $cmd);
+              logw('Command: '.$cmd);
+              exec($cmd, $output, $return);
+              logw('<pre>'.print_r($output,true).'</pre>');
+              logw('Return code: '.$return);
+          }
+      }
   }
   
-?>
+  function joinVideos($filename){
+     $folder = 'D:/tv/de-ad/parts/';
+     
+     if(file_exists($folder.'list.txt')){
+         unlink($folder.'list.txt');
+     }
+     $parts = array_values(array_diff(scandir($folder, SCANDIR_SORT_ASCENDING), array('.','..')));
+     logw($parts);
+     for($i=0; $i<count($parts); $i++){
+         file_put_contents($folder.'list.txt', 'file '.$folder.$parts[$i]."\n", FILE_APPEND);
+     }
+     $cmd = array();
+     $cmd[] = 'D:/tv/programs/ffmpeg.exe';
+     $cmd[] = '-hide_banner -y';
+     $cmd[] = '-f concat -safe 0 -i "'.$folder.'list.txt"'; 
+     $cmd[] = '-c copy D:/tv/de-ad/joined-.'.$filename.'.mp4';
+     $cmd[] = '2>&1';
+     $cmd = implode(' ', $cmd);
+     logw('Command: '.$cmd);
+     exec($cmd, $output, $return);
+     logw('<pre>'.print_r($output,true).'</pre>');
+     logw('Return code: '.$return);       
+     eraseFolderContents($folder);
+  }
+  
+  function eraseFolderContents($folder){
+      $files = array_diff(scandir($folder),array('.','..'));
+      foreach($files as $file){
+          unlink($folder.$file);
+      }
+  }
+  
+  function runCommercialRemoval(){
+      $videoFile = "D:/tv/de-ad/Dog Tales - S09E17 - [DABL][v2.3].mp4";
+      $shrankVideoFile = scaleDownMedia($videoFile);
+      echo '<hr>';
+      resizeImages($shrankVideoFile);
+      echo '<hr>';
+      cutOutCommercials($shrankVideoFile);
+      echo '<hr>';
+      joinVideos(pathinfo($videoFile, PATHINFO_BASENAME));
+      echo '<hr>';
+  }
