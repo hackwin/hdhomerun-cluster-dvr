@@ -179,16 +179,18 @@
   }
   
   function scanShowsAndRecordCli(){
+    transferLogFile(date('Y-m-d').'-scanShowsAndRecord.html');
     do{
-        while(time() % (15*60) > 3){ // every 15 minutes :00 :15 :30 :45
-            if(time() % 60 == 0){
-                logw('sleeping '.time());
-            }
+        global $log;
+        if(substr(pathinfo($log['path'], PATHINFO_FILENAME),0,10) != date('Y-m-d')){
+            transferLogFile(date('Y-m-d').'-scanShowsAndRecord.html', $createNew=true);
+        }
+        while(time() % (15*60) > 1){ // every 15 minutes :00 :15 :30 :45
             sleep(1);            
-        }        
-        transferLogFile(date('Y-m-d').'-scanShowsAndRecord.html');
+        }
+        logw('running at '.date('Y-m-d h:i:s A'));
         $scanShows = getScanShows();
-        logw('<pre>Scan shows: '.print_r($scanShows,true).'</pre>');
+        //logw('<pre>Scan shows: '.print_r($scanShows,true).'</pre>');
         
         $runningChannels = getChannelsRunning();
         $tuners = getTunerListPerSlot();
@@ -340,7 +342,7 @@
       $online = [];
       $ch = curl_init();
       foreach($tuners as $tuner){
-          curl_setopt_array($ch, [CURLOPT_URL => 'http://'.$tuner.'/status.json', CURLOPT_TIMEOUT => 1, CURLOPT_RETURNTRANSFER => 1]);
+          curl_setopt_array($ch, [CURLOPT_URL => 'http://'.$tuner.'/status.json', CURLOPT_TIMEOUT_MS => 100, CURLOPT_RETURNTRANSFER => 1]);
           curl_exec($ch);
           if(curl_getinfo($ch, CURLINFO_HTTP_CODE) == 200){
             $online[] = $tuner;
