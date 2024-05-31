@@ -331,7 +331,7 @@
   
   function http_get_contents($address){
     $ch = curl_init($address);
-    curl_setopt_array($ch, [CURLOPT_TIMEOUT => 1, CURLOPT_RETURNTRANSFER => true]);
+    curl_setopt_array($ch, [CURLOPT_TIMEOUT_MS => 500, CURLOPT_RETURNTRANSFER => true]);
     $result = curl_exec($ch);
     curl_close($ch);
     return $result;
@@ -342,7 +342,7 @@
       $online = [];
       $ch = curl_init();
       foreach($tuners as $tuner){
-          curl_setopt_array($ch, [CURLOPT_URL => 'http://'.$tuner.'/status.json', CURLOPT_TIMEOUT_MS => 100, CURLOPT_RETURNTRANSFER => 1]);
+          curl_setopt_array($ch, [CURLOPT_URL => 'http://'.$tuner.'/status.json', CURLOPT_TIMEOUT_MS => 500, CURLOPT_RETURNTRANSFER => 1]);
           curl_exec($ch);
           if(curl_getinfo($ch, CURLINFO_HTTP_CODE) == 200){
             $online[] = $tuner;
@@ -354,6 +354,10 @@
   
   function getTunerUsage($tunerIP){
         $json = http_get_contents('http://'.$tunerIP.'/status.json');
+        if($json == null){
+            logw('Failed to retrieve tuner usage JSON file on '.$tunerIP);
+            return;
+        }
         $channels = [];
         foreach(json_decode($json,true) as $tuner){
             if(isset($tuner['VctNumber']) && isset($tuner['VctName'])){
@@ -535,7 +539,7 @@
   
   function detectChannels($tunerIP){
     $ch = curl_init('http://'.$tunerIP.'/lineup.post?scan=start&source=Antenna');
-    curl_setopt_array($ch, [CURLOPT_TIMEOUT => 1, CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true]);
+    curl_setopt_array($ch, [CURLOPT_TIMEOUT_MS => 500, CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true]);
     $result = curl_exec($ch);
     curl_close($ch);
     return $result;
